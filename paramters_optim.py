@@ -1,19 +1,13 @@
 import numpy as np
-from google import genai
-from google.genai import types
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import json
 import re
-import os
 from typing import List, Tuple
 from jinja2 import Template
 from collections import deque
 import time
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib import cm
-from matplotlib.animation import FuncAnimation, PillowWriter
 
-import wandb
 from wandb_log import init_wandb, log_iteration, finish_wandb, set_test_prefix
 
 class EpisodeRewardBufferNoBias:
@@ -39,7 +33,7 @@ class LLMBrain:
         self,
         llm_si_template: Template,
         llm_output_conversion_template: Template = None,
-        llm_model_name: str = "gemini-2.5-flash"
+        llm_model_name: str = "Qwen/Qwen2.5-14B-Instruct"
     ):
         self.llm_si_template = llm_si_template
         self.llm_output_conversion_template = llm_output_conversion_template
@@ -47,15 +41,17 @@ class LLMBrain:
         self.llm_model_name = llm_model_name
         self.template_vars = {}
 
-        # Configure Gemini API using google-genai
-        print(f"Configuring Gemini model: {llm_model_name}...")
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not set")
-        
-        self.client = genai.Client(api_key=api_key)
-        print("Model configured!")
-        self.model_group = "gemini"
+        # Load model
+        print(f"Loading model: {llm_model_name}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            llm_model_name,
+            device_map="auto",
+            dtype=torch.float16,
+        )
+        self.model.eval()
+        print("Model loaded!")
+        self.model_group = "local"
 
     def reset_llm_conversation(self):
         self.llm_conversation = []
@@ -64,36 +60,44 @@ class LLMBrain:
         self.llm_conversation.append({"role": role, "content": text})
 
     def query_llm(self):
-        """Query Gemini API using google-genai"""
-        # Build the prompt from conversation history
-        system_prompt = "You are a numerical optimizer. Always respond in valid JSON format."
-        
-        # Combine all messages into a single prompt for Gemini
-        full_prompt = system_prompt + "\n\n"
-        for msg in self.llm_conversation:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "user":
-                full_prompt += f"User: {content}\n\n"
-            elif role == "assistant":
-                full_prompt += f"Assistant: {content}\n\n"
-        
-        # Generate response using google-genai client
-        response = self.client.models.generate_content(
-            model=self.llm_model_name,
-            contents=full_prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=512,
-                temperature=0.7,
-            )
+        """Query local LLM model"""
+        messages = [
+            {"role": "system", "content": "You are a numerical optimizer. Always respond in valid JSON format."},
+        ]
+
+        messages.extend(self.llm_conversation)
+
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
         )
-        
-        response_text = response.text
+
+        inputs = self.tokenizer(
+            formatted_prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=4096
+        ).to(self.model.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+
+        response = self.tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1]:],
+            skip_special_tokens=True
+        )
 
         # Add response to conversation
-        self.add_llm_conversation(response_text, role="assistant")
+        self.add_llm_conversation(response, role="assistant")
 
-        return response_text
+        return response
 
     def parse_parameters(self, parameters_string):
         """Parse parameters from LLM response string"""
@@ -247,7 +251,7 @@ class LLMBrain:
 
 class SimpleLLMOptimizer:
     
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-14B-Instruct"):
 
         # Define Jinja2 template for system prompt
         self.llm_si_template = Template("""
@@ -262,7 +266,7 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 # Here's how we'll interact:
 1. I will first provide MAX_STEPS ({{ MAX_ITERS }}) along with a few training examples.
 2. You will provide your response in the following exact format:
-    * Line 1: a new input 'params: ', aiming to maximize the function's value f(params).
+    * Line 1: a new input 'params[0]: , params[1]: , params[2]: ,..., params[{{ rank - 1 }}]: ', aiming to maximize the function's value f(params).
     Please propose params values in the range of [{{ "%.1f"|format(param_min) }}, {{ "%.1f"|format(param_max) }}], with 1 decimal place.
     * Line 2: detailed explanation of why you chose that input.
 3. I will then provide the function's value f(params) at that point, and the current iteration.
@@ -288,37 +292,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
 
         # Initialize episode reward buffer
         self.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
-
-    def plot_1d_animation(self, data_trace, x_range, title, filename, fps=2):
-        """Plot 1D function trace"""
-        x_values = np.linspace(x_range[0], x_range[1], 400)
-        y_values = [self.current_objective_fn([x]) for x in x_values]
-
-        fig, ax = plt.subplots(figsize=(8,6), dpi=120)
-
-        def update(frame):
-            ax.clear()
-
-            ax.plot(x_values, y_values, color='black', label='f(params)', zorder=1, lw=2)
-
-            current_trace = data_trace[:frame+1]
-            colors = plt.cm.viridis(np.linspace(0, 1, len(current_trace)))
-
-            for step, pt in enumerate(current_trace):
-                ax.scatter(pt[0], pt[1], s=130, color=colors[step], marker='o', zorder=2+step)
-            
-            ax.set_title(f'{title} - Step {frame+1}/{len(data_trace)}')
-            ax.set_xlabel('Parameter Value')
-            ax.set_ylabel('Function Value f(params)')
-            ax.legend()
-
-            norm = mcolors.Normalize(vmin=0, vmax=len(data_trace))
-            sm = cm.ScalarMappable(cmap='plasma', norm=norm)
-            sm.set_array([])
-
-        anim = FuncAnimation(fig, update, frames=len(data_trace), interval=1000/fps, repeat=True)
-        anim.save(filename, writer=PillowWriter(fps=fps))
-        plt.close(fig)
     
     def optimize_1(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), search_step_size=0.1, test_prefix=""):
         """
@@ -332,7 +305,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test1_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting Optimization")
+        print(f"Starting ProPS Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -353,16 +326,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
-
-        data_trace = []
-        self.current_objective_fn = objective_fn
         
         for iteration in range(max_iterations):
             print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
-
-            if iteration > 0:
-                print(f"Waiting 15s to respect rate limits...")
-                time.sleep(15) 
             
             # 1. Propose parameters
             new_parameters_list, conversation_log, api_time = self.brain.llm_update_parameters_num_optim(
@@ -384,9 +350,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             
             # 3. Add to buffer
             self.episode_reward_buffer.add(new_parameters_list, reward)
-
-            # Update data trace for plotting
-            data_trace.append((new_parameters_list[0], reward))
             
             # 4. Display best value
             best_reward = max([r for _, r in self.episode_reward_buffer.buffer])
@@ -408,21 +371,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"Best params: {best_params}")
         print(f"Best reward: {best_reward:.4f}")
         print(f"{'='*60}\n")
-
-        # Plot final trace
-        if data_trace:
-            gif_filename = f"{test_prefix}optimization_trace.gif"
-            self.plot_1d_animation(
-                data_trace=data_trace,
-                x_range=param_range,
-                title=f'{test_prefix}Optimization',
-                filename=gif_filename,
-                fps=2
-            )
-
-            wandb.log({
-                    f"{test_prefix}optimization_animation": wandb.Video(gif_filename, fps=2, format="gif")
-                })
         
         return best_params, best_reward
     
@@ -438,7 +386,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test2_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting Optimization")
+        print(f"Starting ProPS Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -459,16 +407,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
-
-        data_trace = []
-        self.current_objective_fn = objective_fn
         
         for iteration in range(max_iterations):
             print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
-
-            if iteration > 0:
-                print(f"Waiting 15s to respect rate limits...")
-                time.sleep(15) 
             
             # 1. Propose parameters
             new_parameters_list, conversation_log, api_time = self.brain.llm_update_parameters_num_optim(
@@ -490,9 +431,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             
             # 3. Add to buffer
             self.episode_reward_buffer.add(new_parameters_list, reward)
-
-            # Update data trace for plotting
-            data_trace.append((new_parameters_list[0], reward))
             
             # 4. Display best value
             best_reward = max([r for _, r in self.episode_reward_buffer.buffer])
@@ -514,21 +452,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"Best params: {best_params}")
         print(f"Best reward: {best_reward:.4f}")
         print(f"{'='*60}\n")
-
-        # Plot final trace
-        if data_trace:
-            gif_filename = f"{test_prefix}optimization_trace.gif"
-            self.plot_1d_animation(
-                data_trace=data_trace,
-                x_range=param_range,
-                title=f'{test_prefix}Optimization',
-                filename=gif_filename,
-                fps=2
-            )
-
-            wandb.log({
-                    f"{test_prefix}optimization_animation": wandb.Video(gif_filename, fps=2, format="gif")
-                })
         
         return best_params, best_reward
 
@@ -553,7 +476,7 @@ def test_quadratic_function(params: np.ndarray) -> float:
 
 def test_nonlinear_function(params: np.ndarray) -> float:
     """
-    Test 2: Nonlinear Complex Function
+    Test 3: Nonlinear Complex Function
     This function has multiple local optima
     """
 
@@ -568,10 +491,18 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 
 
 def main():
+    
+    print("\n" + "="*60)
+    print("LLM Reasoning Test for ProPS")
+    print("="*60)
+    print("Testing LLM's ability to optimize parameters")
+    print("without using actual robot environment")
+    print("="*60 + "\n")
+    
     # Start single wandb run for both tests
     init_wandb(
         project_name="LLM_Optimization", 
-        run_name="Parameter Optimization Gemini", 
+        run_name="Combined_Tests", 
         config={
             "num_tests": 2,
             "test1_name": "Quadratic Function",
@@ -585,16 +516,9 @@ def main():
         }
     )
     
-    print("\n" + "="*60)
-    print("LLM Reasoning Tests for Parameter Optimization Gemini")
-    print("="*60)
-    print("Testing LLM's ability to optimize parameters")
-    print("without using actual robot environment")
-    print("="*60 + "\n")
-    
     # Initialize optimizer
     optimizer = SimpleLLMOptimizer(
-        model_name="gemini-2.5-flash"
+        model_name="Qwen/Qwen2.5-14B-Instruct"
     )
     
     # ===== Test 1: Simple Quadratic Function =====
@@ -607,12 +531,12 @@ def main():
     best_params_1, best_reward_1 = optimizer.optimize_1(
         objective_fn=test_quadratic_function,
         param_dim=1,
-        max_iterations=19,
+        max_iterations=30,
         param_range=(-3.0, 3.0),
         test_prefix="test1_"
     )
     
-    #input("\nPress Enter to continue to Test 2...")
+    input("\nPress Enter to continue to Test 2...")
     
     # Reset buffer for Test 2
     optimizer.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)

@@ -9,7 +9,7 @@ def init_wandb(project_name, run_name, config):
         project=project_name,
         name=run_name,
         config=config,
-        reinit=False  # Don't reinitialize if already running
+        reinit=False
     )
     print(f"Wandb initialized: {project_name}/{run_name}")
 

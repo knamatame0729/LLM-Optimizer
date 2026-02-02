@@ -7,7 +7,12 @@ from typing import List, Tuple
 from jinja2 import Template
 from collections import deque
 import time
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib import cm
+from matplotlib.animation import FuncAnimation, PillowWriter
 
+import wandb
 from wandb_log import init_wandb, log_iteration, finish_wandb, set_test_prefix
 
 class EpisodeRewardBufferNoBias:
@@ -25,7 +30,7 @@ class EpisodeRewardBufferNoBias:
     def __str__(self):
         buffer_table = "Parameters | Reward\n"
         for weights, reward in self.buffer:
-            buffer_table += f"{weights[0]:.3f} | {reward:.4f}\n"
+            buffer_table += f"{weights[0]:.1f} | {reward:.4f}\n"
         return buffer_table
 
 class LLMBrain:
@@ -47,7 +52,7 @@ class LLMBrain:
         self.model = AutoModelForCausalLM.from_pretrained(
             llm_model_name,
             device_map="auto",
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
         self.model.eval()
         print("Model loaded!")
@@ -84,10 +89,14 @@ class LLMBrain:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=512,
-                temperature=0.7,
+                temperature=0.6,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
+
+        input_token_count = inputs["input_ids"].shape[1]
+
+        print(f"LLM input tokens: {input_token_count}, output tokens: {outputs.shape[1] - input_token_count}")
 
         response = self.tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
@@ -274,8 +283,9 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 
 # Remember:
 1. **DO NOT PROPOSE PREVIOUSLY SEEN PARAMS**
-2. **The global optimum should be around {{ optimum }}.** If you are below that, this is just a local optimum. You should explore instead of exploiting.
-3. Search both positive and negative values. **During exploration, use search step size of {{ step_size }}**.
+2. **Balance Exploitation and Exploration:**  Early on, explore broadly. As iterations increase, focus more on promising regions.
+3. Search both positive and negative values. **DURING EXPLORATION, USE SEARCH STEP SIZE OF {{ step_size }}**.
+4. **Be adaptable:**  Your approach might need to change based on the function's behavior and the remaining iterations. If you think you are stuck in a local minima or making small increments for too long, try more exploratory values and then eventually exploit new values based on your understanding of the function.
 
 
 Next, you will see examples of params and f(params) pairs.
@@ -292,6 +302,37 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
 
         # Initialize episode reward buffer
         self.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
+
+    def plot_1d_animation(self, data_trace, x_range, title, filename, fps=2):
+        """Plot 1D function trace"""
+        x_values = np.linspace(x_range[0], x_range[1], 400)
+        y_values = [self.current_objective_fn([x]) for x in x_values]
+
+        fig, ax = plt.subplots(figsize=(8,6), dpi=120)
+
+        def update(frame):
+            ax.clear()
+
+            ax.plot(x_values, y_values, color='black', label='f(params)', zorder=1, lw=2)
+
+            current_trace = data_trace[:frame+1]
+            colors = plt.cm.viridis(np.linspace(0, 1, len(current_trace)))
+
+            for step, pt in enumerate(current_trace):
+                ax.scatter(pt[0], pt[1], s=130, color=colors[step], marker='o', zorder=2+step)
+            
+            ax.set_title(f'{title} - Step {frame+1}/{len(data_trace)}')
+            ax.set_xlabel('Parameter Value')
+            ax.set_ylabel('Function Value f(params)')
+            ax.legend()
+
+            norm = mcolors.Normalize(vmin=0, vmax=len(data_trace))
+            sm = cm.ScalarMappable(cmap='plasma', norm=norm)
+            sm.set_array([])
+
+        anim = FuncAnimation(fig, update, frames=len(data_trace), interval=1000/fps, repeat=True)
+        anim.save(filename, writer=PillowWriter(fps=fps))
+        plt.close(fig)
     
     def optimize_1(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), search_step_size=0.1, test_prefix=""):
         """
@@ -305,7 +346,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test1_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -326,6 +367,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
+
+        data_trace = []
+        self.current_objective_fn = objective_fn
         
         for iteration in range(max_iterations):
             print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
@@ -350,6 +394,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             
             # 3. Add to buffer
             self.episode_reward_buffer.add(new_parameters_list, reward)
+
+            # Update data trace for plotting
+            data_trace.append((new_parameters_list[0], reward))
             
             # 4. Display best value
             best_reward = max([r for _, r in self.episode_reward_buffer.buffer])
@@ -371,6 +418,21 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"Best params: {best_params}")
         print(f"Best reward: {best_reward:.4f}")
         print(f"{'='*60}\n")
+
+        # Plot final trace
+        if data_trace:
+            gif_filename = f"{test_prefix}optimization_trace.gif"
+            self.plot_1d_animation(
+                data_trace=data_trace,
+                x_range=param_range,
+                title=f'{test_prefix}Optimization',
+                filename=gif_filename,
+                fps=2
+            )
+
+            wandb.log({
+                    f"{test_prefix}optimization_animation": wandb.Video(gif_filename, fps=2, format="gif")
+                })
         
         return best_params, best_reward
     
@@ -386,7 +448,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test2_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -407,6 +469,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
+
+        data_trace = []
+        self.current_objective_fn = objective_fn
         
         for iteration in range(max_iterations):
             print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
@@ -431,6 +496,9 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             
             # 3. Add to buffer
             self.episode_reward_buffer.add(new_parameters_list, reward)
+
+            # Update data trace for plotting
+            data_trace.append((new_parameters_list[0], reward))
             
             # 4. Display best value
             best_reward = max([r for _, r in self.episode_reward_buffer.buffer])
@@ -452,6 +520,21 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"Best params: {best_params}")
         print(f"Best reward: {best_reward:.4f}")
         print(f"{'='*60}\n")
+
+        # Plot final trace
+        if data_trace:
+            gif_filename = f"{test_prefix}optimization_trace.gif"
+            self.plot_1d_animation(
+                data_trace=data_trace,
+                x_range=param_range,
+                title=f'{test_prefix}Optimization',
+                filename=gif_filename,
+                fps=2
+            )
+
+            wandb.log({
+                    f"{test_prefix}optimization_animation": wandb.Video(gif_filename, fps=2, format="gif")
+                })
         
         return best_params, best_reward
 
@@ -482,7 +565,7 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 
     params = params[0]
 
-    score = -(params**2) / 10 + 5 * np.cos(0.6*params)
+    score = -(params**2) + 5 * np.cos(2*params)
 
     # Shift reward to be around 100 at optimum
     reward = score + 95.0
@@ -491,27 +574,19 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 
 
 def main():
-    
-    print("\n" + "="*60)
-    print("LLM Reasoning Test for ProPS")
-    print("="*60)
-    print("Testing LLM's ability to optimize parameters")
-    print("without using actual robot environment")
-    print("="*60 + "\n")
-    
     # Start single wandb run for both tests
     init_wandb(
-        project_name="LLM_Optimization", 
-        run_name="Combined_Tests", 
+        project_name="LLM_Optimization Test 3", 
+        run_name="Parameter Optimization Qwen Changed Decimal", 
         config={
             "num_tests": 2,
             "test1_name": "Quadratic Function",
             "test1_param_dim": 1,
-            "test1_max_iterations": 30,
+            "test1_max_iterations": 50,
             "test1_param_range": (-3.0, 3.0),
             "test2_name": "Nonlinear Function",
             "test2_param_dim": 1,
-            "test2_max_iterations": 30,
+            "test2_max_iterations": 50,
             "test2_param_range": (-4.0, 4.0),
         }
     )
@@ -531,12 +606,12 @@ def main():
     best_params_1, best_reward_1 = optimizer.optimize_1(
         objective_fn=test_quadratic_function,
         param_dim=1,
-        max_iterations=30,
+        max_iterations=50,
         param_range=(-3.0, 3.0),
         test_prefix="test1_"
     )
     
-    input("\nPress Enter to continue to Test 2...")
+    #input("\nPress Enter to continue to Test 2...")
     
     # Reset buffer for Test 2
     optimizer.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
@@ -551,7 +626,7 @@ def main():
     best_params_2, best_reward_2 = optimizer.optimize_2(
         objective_fn=test_nonlinear_function,
         param_dim=1,
-        max_iterations=30,
+        max_iterations=50,
         param_range=(-4.0, 4.0),
         test_prefix="test2_"
     )

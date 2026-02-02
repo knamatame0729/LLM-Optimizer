@@ -89,7 +89,7 @@ class LLMBrain:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=512,
-                temperature=1.2,
+                temperature=1.0,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
@@ -283,8 +283,8 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 
 # Remember:
 1. **DO NOT PROPOSE PREVIOUSLY SEEN PARAMS**
-2. **The global optimum should be around {{ optimum }}.** If you are below that, this is just a local optimum. You should explore instead of exploiting.
-3. Search both positive and negative values. **During exploration, use search step size of {{ step_size }}**.
+2. **The global optimum should be around {{ optimum }}.** **IF YOU ARE BELOW THAT, THIS IS JUST A LOCAL OPTIMUM. YOU SHOULD EXPLORE INSTEAD OF EXPLOITING.**
+3. Search both positive and negative values. **DURING EXPLORATION, USE SEARCH STEP SIZE OF {{ step_size }}**.
 
 
 Next, you will see examples of params and f(params) pairs.
@@ -345,7 +345,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test1_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -447,7 +447,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test2_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
