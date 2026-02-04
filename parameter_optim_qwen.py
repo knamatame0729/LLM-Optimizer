@@ -284,7 +284,7 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 # Remember:
 1. **DO NOT PROPOSE PREVIOUSLY SEEN PARAMS**
 2. **Balance Exploitation and Exploration:**  Early on, explore broadly. As iterations increase, focus more on promising regions.
-3. Search both positive and negative values. **DURING EXPLORATION, USE SEARCH STEP SIZE OF {{ step_size }}**.
+3. **Search both POSITIVE and NEGATIVE values.**
 4. **Be adaptable:**  Your approach might need to change based on the function's behavior and the remaining iterations. If you think you are stuck in a local minima or making small increments for too long, try more exploratory values and then eventually exploit new values based on your understanding of the function.
 
 
@@ -565,10 +565,10 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 
     params = params[0]
 
-    score = -(params**2) + 5 * np.cos(2*params)
+    score = -0.5 * (params**2) + np.cos(9*params)
 
     # Shift reward to be around 100 at optimum
-    reward = score + 95.0
+    reward = score + 99.0
     
     return reward
 

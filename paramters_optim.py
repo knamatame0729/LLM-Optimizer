@@ -1,3 +1,4 @@
+"""Parameters Optimization using LLM"""
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -7,7 +8,12 @@ from typing import List, Tuple
 from jinja2 import Template
 from collections import deque
 import time
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib import cm
+from matplotlib.animation import FuncAnimation, PillowWriter
 
+import wandb
 from wandb_log import init_wandb, log_iteration, finish_wandb, set_test_prefix
 
 class EpisodeRewardBufferNoBias:
@@ -25,7 +31,8 @@ class EpisodeRewardBufferNoBias:
     def __str__(self):
         buffer_table = "Parameters | Reward\n"
         for weights, reward in self.buffer:
-            buffer_table += f"{weights[0]:.3f} | {reward:.4f}\n"
+            params_str = ", ".join([f"{w:.1f}" for w in weights])
+            buffer_table += f"{params_str} | {reward:.4f}\n"
         return buffer_table
 
 class LLMBrain:
@@ -47,7 +54,7 @@ class LLMBrain:
         self.model = AutoModelForCausalLM.from_pretrained(
             llm_model_name,
             device_map="auto",
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
         self.model.eval()
         print("Model loaded!")
@@ -84,10 +91,14 @@ class LLMBrain:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=512,
-                temperature=0.7,
+                temperature=0.6,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
+
+        input_token_count = inputs["input_ids"].shape[1]
+
+        print(f"LLM input tokens: {input_token_count}, output tokens: {outputs.shape[1] - input_token_count}")
 
         response = self.tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
@@ -266,7 +277,7 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 # Here's how we'll interact:
 1. I will first provide MAX_STEPS ({{ MAX_ITERS }}) along with a few training examples.
 2. You will provide your response in the following exact format:
-    * Line 1: a new input 'params[0]: , params[1]: , params[2]: ,..., params[{{ rank - 1 }}]: ', aiming to maximize the function's value f(params).
+    * Line 1: a new input 'params: ', aiming to maximize the function's value f(params).
     Please propose params values in the range of [{{ "%.1f"|format(param_min) }}, {{ "%.1f"|format(param_max) }}], with 1 decimal place.
     * Line 2: detailed explanation of why you chose that input.
 3. I will then provide the function's value f(params) at that point, and the current iteration.
@@ -275,7 +286,8 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 # Remember:
 1. **DO NOT PROPOSE PREVIOUSLY SEEN PARAMS**
 2. **The global optimum should be around {{ optimum }}.** If you are below that, this is just a local optimum. You should explore instead of exploiting.
-3. Search both positive and negative values. **During exploration, use search step size of {{ step_size }}**.
+3. **Search both positive and negative values.**
+4. **Be adaptable:**  Your approach might need to change based on the function's behavior and the remaining iterations. If you think you are stuck in a local minima or making small increments for too long, try more exploratory values and then eventually exploit new values based on your understanding of the function.
 
 
 Next, you will see examples of params and f(params) pairs.
@@ -305,7 +317,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test1_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -350,7 +362,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             
             # 3. Add to buffer
             self.episode_reward_buffer.add(new_parameters_list, reward)
-            
+
             # 4. Display best value
             best_reward = max([r for _, r in self.episode_reward_buffer.buffer])
             print(f"Best so far: {best_reward:.4f}")
@@ -386,7 +398,7 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             test_prefix: Prefix for wandb logging (e.g., "test2_")
         """
         print(f"\n{'='*60}")
-        print(f"Starting ProPS Optimization")
+        print(f"Starting Optimization")
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
@@ -464,11 +476,11 @@ def test_quadratic_function(params: np.ndarray) -> float:
     """
     Test 1: Simple Quadratic Function
     f(params) = -sum((params - target)^2)
-    Target: params = [1.0]
+    Target: params = [1.0, 1.0, 1.0]
     Maximum reward = 100.0
     """
     params = np.array(params)
-    target = 1.0
+    target = np.array([1.0, 1.0, 1.0])
     error = np.sum((params - target) ** 2)
     reward = 100.0 - error * 10.0
     return reward
@@ -480,38 +492,32 @@ def test_nonlinear_function(params: np.ndarray) -> float:
     This function has multiple local optima
     """
 
-    params = params[0]
+    params = np.array(params)
 
-    score = -(params**2) / 10 + 5 * np.cos(0.6*params)
+    score = 0
+    for p in params:
+        score += -0.5 * (p**2) + np.cos(9 * p)
 
     # Shift reward to be around 100 at optimum
-    reward = score + 95.0
+    reward = score + 99.0
     
     return reward
 
 
 def main():
-    
-    print("\n" + "="*60)
-    print("LLM Reasoning Test for ProPS")
-    print("="*60)
-    print("Testing LLM's ability to optimize parameters")
-    print("without using actual robot environment")
-    print("="*60 + "\n")
-    
     # Start single wandb run for both tests
     init_wandb(
-        project_name="LLM_Optimization", 
-        run_name="Combined_Tests", 
+        project_name="Function Optimization based on LLM", 
+        run_name="Parameter Optimization Qwen Changed Decimal", 
         config={
             "num_tests": 2,
             "test1_name": "Quadratic Function",
-            "test1_param_dim": 1,
-            "test1_max_iterations": 30,
+            "test1_param_dim": 3,
+            "test1_max_iterations": 70,
             "test1_param_range": (-3.0, 3.0),
             "test2_name": "Nonlinear Function",
-            "test2_param_dim": 1,
-            "test2_max_iterations": 30,
+            "test2_param_dim": 3,
+            "test2_max_iterations": 70,
             "test2_param_range": (-4.0, 4.0),
         }
     )
@@ -525,18 +531,18 @@ def main():
     print("\n" + "#"*60)
     print("# TEST 1: Simple Quadratic Function")
     print("#"*60)
-    print("Target: params = [1.0]")
+    print("Target: params = [1.0, 1.0, 1.0]")
     print("Maximum reward: 100.0")
     
     best_params_1, best_reward_1 = optimizer.optimize_1(
         objective_fn=test_quadratic_function,
-        param_dim=1,
-        max_iterations=30,
+        param_dim=3,
+        max_iterations=70,
         param_range=(-3.0, 3.0),
         test_prefix="test1_"
     )
     
-    input("\nPress Enter to continue to Test 2...")
+    #input("\nPress Enter to continue to Test 2...")
     
     # Reset buffer for Test 2
     optimizer.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
@@ -550,8 +556,8 @@ def main():
     
     best_params_2, best_reward_2 = optimizer.optimize_2(
         objective_fn=test_nonlinear_function,
-        param_dim=1,
-        max_iterations=30,
+        param_dim=3,
+        max_iterations=70,
         param_range=(-4.0, 4.0),
         test_prefix="test2_"
     )
