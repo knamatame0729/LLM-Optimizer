@@ -40,7 +40,7 @@ class LLMBrain:
         self,
         llm_si_template: Template,
         llm_output_conversion_template: Template = None,
-        llm_model_name: str = "Qwen/Qwen2.5-14B-Instruct"
+        llm_model_name: str = "meta-llama/Meta-Llama-3-8B-Instruct"
     ):
         self.llm_si_template = llm_si_template
         self.llm_output_conversion_template = llm_output_conversion_template
@@ -195,15 +195,11 @@ class LLMBrain:
                         pass
             
             # Last resort: find first number in response
-            number_match = re.search(r'-?\d+\.?\d+', cleaned)
-            if number_match:
-                try:
-                    param = float(number_match.group())
-                    new_parameters_list = [param]
-                    print(f"✓ Parsed 1 parameter from first number: {param}")
-                    return new_parameters_list
-                except ValueError:
-                    pass
+            numbers = re.findall(r'-?\d+\.?\d+', cleaned)
+            if numbers:
+                new_parameters_list = [float(x) for x in numbers[:3]]
+                print(f"✓ Parsed {len(new_parameters_list)} parameters from all numbers: {new_parameters_list}")
+                return new_parameters_list
 
         except Exception as e:
             print(f"Error parsing parameters: {e}")
@@ -262,7 +258,7 @@ class LLMBrain:
 
 class SimpleLLMOptimizer:
     
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-14B-Instruct"):
+    def __init__(self, model_name: str = "meta-llama/Meta-Llama-3-8B-Instruct"):
 
         # Define Jinja2 template for system prompt
         self.llm_si_template = Template("""
@@ -512,8 +508,8 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 def main():
     # Start single wandb run for both tests
     init_wandb(
-        project_name="Function Optimization based on LLM", 
-        run_name="Parameter Optimization Qwen Changed Decimal", 
+        project_name="Function Optimization Llama", 
+        run_name="Parameter Optimization Llama", 
         config={
             "num_tests": 2,
             "test1_name": "Quadratic Function",
@@ -529,7 +525,7 @@ def main():
     
     # Initialize optimizer
     optimizer = SimpleLLMOptimizer(
-        model_name="Qwen/Qwen2.5-14B-Instruct"
+        model_name="meta-llama/Meta-Llama-3-8B-Instruct"
     )
     
     # ===== Test 1: Simple Quadratic Function =====
