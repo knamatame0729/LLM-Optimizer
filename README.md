@@ -11,25 +11,9 @@ This project demonstraets how LLMs can be used as optimizers for numerical optim
 
 ## Optimization Objective
 
-The goal is to find:
-
-$$
-\mathbf{x}^* = \arg\min_{\mathbf{x} \in \mathcal{X}} f(\mathbf{x})
-$$
-
-where:
-
-- $\mathbf{x} \in \mathbb{R}^d$ is the parameter vector
-- $f: \mathbb{R}^d \rightarrow \mathbb{R}$ is the objective function to minimize
-- $\mathcal{X} = [x_{\min}, x_{\max}]^d$ is the parameter space
-
-The framework converts this minimization problem into a maximization of rewards:
-
-$$
-\text{reward}(\mathbf{x}) = 100 - f(\mathbf{x})
-$$
-
-This allows the LLM to learn through in-context examples that higher rewards correspond to better solutions.
+<div align="center">
+  <img src="./objective.png"  width="800">
+</div>
 
 
 ## Features
