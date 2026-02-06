@@ -195,11 +195,15 @@ class LLMBrain:
                         pass
             
             # Last resort: find first number in response
-            numbers = re.findall(r'-?\d+\.?\d+', cleaned)
-            if numbers:
-                new_parameters_list = [float(x) for x in numbers[:3]]
-                print(f"✓ Parsed {len(new_parameters_list)} parameters from all numbers: {new_parameters_list}")
-                return new_parameters_list
+            number_match = re.search(r'-?\d+\.?\d+', cleaned)
+            if number_match:
+                try:
+                    param = float(number_match.group())
+                    new_parameters_list = [param]
+                    print(f"✓ Parsed 1 parameter from first number: {param}")
+                    return new_parameters_list
+                except ValueError:
+                    pass
 
         except Exception as e:
             print(f"Error parsing parameters: {e}")
@@ -217,7 +221,6 @@ class LLMBrain:
         step_number,
         rank=None,
         optimum=None,
-        search_step_size=0.1,
         actions=None,
     ):
 
@@ -232,7 +235,6 @@ class LLMBrain:
                 "step_number": step_number,
                 "rank": rank,
                 "optimum": optimum,
-                "step_size": search_step_size,
                 "actions": actions,
             }
         )
@@ -262,9 +264,9 @@ class SimpleLLMOptimizer:
 
         # Define Jinja2 template for system prompt
         self.llm_si_template = Template("""
-        You are good global optimizer, helping me find the global maximum of a mathematical function f(params).
+        You are good global optimizer, helping me find the global minimum of a mathematical function f(params).
 I will give you the function evaluation and the current iteration number at each step.
-Your goal is to propose input values that efficiently lead us to the global maximum within a limited number of iterations ({{ MAX_ITERS }}).
+Your goal is to propose input values that efficiently lead us to the global minimum within a limited number of iterations ({{ MAX_ITERS }}).
 
 # Regarding the parameters **params**:
 **params** is an array of {{ rank }} float numbers.
@@ -273,12 +275,11 @@ Your goal is to propose input values that efficiently lead us to the global maxi
 # Here's how we'll interact:
 1. I will first provide MAX_STEPS ({{ MAX_ITERS }}) along with a few training examples.
 2. You will provide your response in the following exact format:
-    * Line 1: a new input 'params: ', aiming to maximize the function's value f(params).
+    * Line 1: a new input 'params: ', aiming to minimize the function's value f(params).
     Please propose params values in the range of [{{ "%.1f"|format(param_min) }}, {{ "%.1f"|format(param_max) }}], with 1 decimal place.
     * Line 2: detailed explanation of why you chose that input.
 3. I will then provide the function's value f(params) at that point, and the current iteration.
 4. We will repeat steps 2-3 until we reach the maximum number of iterations.
-
 # Remember:
 1. **DO NOT PROPOSE PREVIOUSLY SEEN PARAMS**
 2. **The global optimum should be around {{ optimum }}.** If you are below that, this is just a local optimum. You should explore instead of exploiting.
@@ -301,15 +302,14 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         # Initialize episode reward buffer
         self.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
     
-    def optimize_1(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), search_step_size=0.1, test_prefix=""):
+    def optimize_1(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), test_prefix=""):
         """
         Optimize parameters.
         
         Args:
-            objective_fn: Objective function to maximize
+            objective_fn: Objective function to minimize
             max_iterations: Maximum number of iterations
             param_range: Parameter value range
-            search_step_size: Step size for parameter search
             test_prefix: Prefix for wandb logging (e.g., "test1_")
         """
         print(f"\n{'='*60}")
@@ -317,7 +317,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
-        print(f"Search step size: {search_step_size}")
         print(f"{'='*60}\n")
 
         # Set test prefix for wandb logging
@@ -331,7 +330,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "param_min": param_range[0],
             "param_max": param_range[1],
             "optimum": 100.0,
-            "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
         
@@ -345,7 +343,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
                 step_number=iteration + 1,
                 rank=param_dim,
                 optimum=self.template_vars['optimum'],
-                search_step_size=self.template_vars['step_size'],
                 actions=None,
             )
 
@@ -382,15 +379,14 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         
         return best_params, best_reward
     
-    def optimize_2(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), search_step_size=0.1, test_prefix=""):
+    def optimize_2(self, objective_fn, param_dim, max_iterations, param_range=(-1.0, 1.0), test_prefix=""):
         """
         Optimize parameters.
         
         Args:
-            objective_fn: Objective function to maximize
+            objective_fn: Objective function to minimize
             max_iterations: Maximum number of iterations
             param_range: Parameter value range
-            search_step_size: Step size for parameter search
             test_prefix: Prefix for wandb logging (e.g., "test2_")
         """
         print(f"\n{'='*60}")
@@ -398,7 +394,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
         print(f"{'='*60}")
         print(f"Max iterations: {max_iterations}")
         print(f"Parameter range: {param_range}")
-        print(f"Search step size: {search_step_size}")
         print(f"{'='*60}\n")
 
         # Set test prefix for wandb logging
@@ -412,7 +407,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
             "param_min": param_range[0],
             "param_max": param_range[1],
             "optimum": 100.0,
-            "step_size": search_step_size,
         }
         self.brain.template_vars = self.template_vars
         
@@ -426,7 +420,6 @@ Now you are at iteration {{step_number}} out of {{ MAX_ITERS }}. Please provide 
                 step_number=iteration + 1,
                 rank=param_dim,
                 optimum=self.template_vars['optimum'],
-                search_step_size=self.template_vars['step_size'],
                 actions=None,
             )
 
@@ -472,17 +465,17 @@ def test_quadratic_function(params: np.ndarray) -> float:
     """
     Test 1: Simple Quadratic Function
     f(params) = -sum((params - target)^2)
-    Target: params = [1.0, 1.0, 1.0]
+    Target: params = [0.0, 0.0, 0.0]
     Maximum reward = 100.0
     """
     params = np.array(params)
 
     score = 0
     for p in params:
-        score += -0.5 * (p**2)
+        score += ((p + 3)**2)
 
     # Shift reward to be around 100 at optimum
-    reward = score + 100.0
+    reward = 100.0 - score
     
     return reward
 
@@ -497,10 +490,10 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 
     score = 0
     for p in params:
-        score += -0.5 * (p**2) + np.cos(9 * p)
+        score += 0.5 * ((p + 3)**2) - np.cos(9 * (p + 3)) + 1.0
 
     # Shift reward to be around 100 at optimum
-    reward = score + 97.0
+    reward = 100.0 - score
     
     return reward
 
@@ -508,18 +501,18 @@ def test_nonlinear_function(params: np.ndarray) -> float:
 def main():
     # Start single wandb run for both tests
     init_wandb(
-        project_name="Function Optimization Llama", 
-        run_name="Parameter Optimization Llama", 
+        project_name="Function Optimization based on LLM", 
+        run_name="Parameter Optimization Meta-Llama", 
         config={
             "num_tests": 2,
             "test1_name": "Quadratic Function",
             "test1_param_dim": 3,
             "test1_max_iterations": 70,
-            "test1_param_range": (-10.0, 10.0),
+            "test1_param_range": (-5.0, 5.0),
             "test2_name": "Nonlinear Function",
             "test2_param_dim": 3,
             "test2_max_iterations": 70,
-            "test2_param_range": (-10.0, 10.0),
+            "test2_param_range": (-5.0, 5.0),
         }
     )
     
@@ -532,34 +525,32 @@ def main():
     print("\n" + "#"*60)
     print("# TEST 1: Simple Quadratic Function")
     print("#"*60)
-    print("Target: params = [1.0, 1.0, 1.0]")
+    print("Target: params = [0.0, 0.0, 0.0]")
     print("Maximum reward: 100.0")
     
     best_params_1, best_reward_1 = optimizer.optimize_1(
         objective_fn=test_quadratic_function,
         param_dim=3,
         max_iterations=70,
-        param_range=(-10.0, 10.0),
+        param_range=(-5.0, 5.0),
         test_prefix="test1_"
     )
-    
-    #input("\nPress Enter to continue to Test 2...")
     
     # Reset buffer for Test 2
     optimizer.episode_reward_buffer = EpisodeRewardBufferNoBias(max_size=200)
     
     # ===== Test 2: Nonlinear Function =====
     print("\n" + "#"*60)
-    print("# TEST 2: Nonlinear Function (Rastrigin-like)")
+    print("# TEST 2: Nonlinear Function")
     print("#"*60)
-    print("This has multiple local optima")
-    print("Testing LLM's global search ability")
+    print("Target: params = [0.0, 0.0, 0.0]")
+    print("Maximum reward: 100.0")
     
     best_params_2, best_reward_2 = optimizer.optimize_2(
         objective_fn=test_nonlinear_function,
         param_dim=3,
         max_iterations=70,
-        param_range=(-10.0, 10.0),
+        param_range=(-5.0, 5.0),
         test_prefix="test2_"
     )
     
